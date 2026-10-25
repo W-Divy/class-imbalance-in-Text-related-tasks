@@ -4,7 +4,7 @@
 =========================================================================================
 CONFERENCE-READY MULTI-SEED IMBALANCE BENCHMARK (v2)
 Fixed Baselines with Class-Weighted Cross-Entropy & 5-Seed Mean ± Std Reporting
-Optimized for RTX 4050 (6GB VRAM) via Local Ollama
+Optimized for RTX 5070 (8GB VRAM) via Local Ollama Model
 =========================================================================================
 """
 
@@ -15,6 +15,7 @@ import json
 import time
 import random
 import logging
+import ollama
 import argparse
 import warnings
 import subprocess
@@ -47,9 +48,6 @@ from sklearn.metrics import (
 warnings.filterwarnings("ignore")
 hf_logging.set_verbosity_error()
 
-OLLAMA_EXE = r"C:\Users\Lenovo\AppData\Local\Programs\Ollama\ollama.exe"
-OLLAMA_API_BASE = "http://localhost:11434"
-
 OUTPUT_DIR = Path("results_conference_v2")
 CACHE_DIR = OUTPUT_DIR / "cache"
 FIG_DIR = OUTPUT_DIR / "figures"
@@ -70,7 +68,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 OPEN_LLMS_OLLAMA = {
-    "Qwen2.5-3B": "qwen2.5:3b",
+    "Qwen2.5-7B": "qwen2.5:7b",
 }
 
 TASKS_CONFIG = {
@@ -135,30 +133,11 @@ class OllamaGenerator:
     def __init__(self, llm_key: str, model_tag: str):
         self.llm_key = llm_key
         self.model_tag = model_tag
-        self.ensure_server_running()
-
-    def ensure_server_running(self):
-        try:
-            r = requests.get(f"{OLLAMA_API_BASE}/api/tags", timeout=3)
-            if r.status_code == 200:
-                return
-        except Exception:
-            pass
-        subprocess.Popen(
-            [OLLAMA_EXE, "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
-        time.sleep(3)
 
     def unload_from_vram(self):
         try:
-            requests.post(
-                f"{OLLAMA_API_BASE}/api/chat",
-                json={"model": self.model_tag, "messages": [], "keep_alive": 0},
-                timeout=10,
-            )
+            # Setting keep_alive to 0 unloads the model from VRAM
+            ollama.chat(model=self.model_tag, keep_alive=0)
         except Exception:
             pass
         flush_vram()
@@ -207,21 +186,23 @@ class OllamaGenerator:
 
             user_msg = f"Generate {batch_gen_count} texts for '{label_name}'.\n{ex_block}\n{attr_block}\nOutput ONLY one per line prefixed with `SAMPLE: `."
             
-            payload = {
-                "model": self.model_tag,
-                "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": user_msg}],
-                "stream": False,
-                "keep_alive": "2m",
-                "options": {"temperature": 0.85, "top_p": 0.92, "seed": seed + attempt},
-            }
             try:
-                resp = requests.post(f"{OLLAMA_API_BASE}/api/chat", json=payload, timeout=60)
-                resp.raise_for_status()
-                decoded = resp.json().get("message", {}).get("content", "")
+                response = ollama.chat(
+                    model=self.model_tag,
+                    messages=[
+                        {"role": "system", "content": sys_msg},
+                        {"role": "user", "content": user_msg}
+                    ],
+                    options={"temperature": 0.85, "top_p": 0.92, "seed": seed + attempt},
+                    keep_alive="2m"
+                )
+                decoded = response.get("message", {}).get("content", "")
+                
                 for s in self.parse_samples(decoded):
                     if s not in collected and s not in min_pool:
                         collected.append(s)
-            except Exception:
+            except Exception as e:
+                logger.error(f"Ollama generation failed on attempt {attempt}: {e}")
                 continue
 
         while len(collected) < num_needed:
@@ -367,7 +348,7 @@ def main():
             TASKS_CONFIG[tk]["majority_per_class"] = 150
 
     seeds = args.seeds
-    llm_key, model_tag = "Qwen2.5-3B", "qwen2.5:3b"
+    llm_key, model_tag = "Qwen2.5-7B", "qwen2.5:7b"
     llm_gen = OllamaGenerator(llm_key, model_tag)
 
     all_records = []
